@@ -6,6 +6,8 @@ This codebase allows you to fine tune GPT-2 to _infill_, i.e., perform text gene
 
 An interactive webdemo can be found at [chrisdonahue.com/ilm](https://chrisdonahue.com/ilm).
 
+This fork allows you to also fine tune Llama-3.2.1B.
+
 ## Installation
 
 We recommend installing this package using `virtualenv`. After activating the virtual environment, run the following commands:
