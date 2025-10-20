@@ -12,6 +12,7 @@ from .official_gpt2_encoder.encoder import Encoder as OfficialEncoder
 class Tokenizer(Enum):
   CUSTOM = 0
   GPT2 = 1
+  LLAMA = 2
 
 DEFAULT_TOKENIZER = Tokenizer.GPT2
 
@@ -52,6 +53,13 @@ def _get_tokenizer_state(tokenizer):
       if len(_CUSTOM_ID_TO_TOKEN) != len(CUSTOM_TOKEN_TO_ID):
         raise ValueError('Duplicate tokens')
       _TOKENIZER_TO_STATE[tokenizer] = (_CUSTOM_ID_TO_TOKEN, CUSTOM_TOKEN_TO_ID)
+    elif tokenizer == Tokenizer.LLAMA:
+      from transformers import AutoTokenizer
+      from huggingface_hub import login
+      your_token = None  # Replace with your actual token
+      login(token=your_token)
+      auto_tokenizer = AutoTokenizer.from_pretrained(f"meta-llama/Llama-3.2-1B")
+      _TOKENIZER_TO_STATE[tokenizer] = auto_tokenizer
     else:
       assert False
 
@@ -72,6 +80,10 @@ def update_tokenizer(additional_ids_to_tokens, tokenizer=DEFAULT_TOKENIZER):
     vocab_size_after = len(state.encoder)
   elif tokenizer == Tokenizer.CUSTOM:
     raise NotImplementedError()
+  elif tokenizer == Tokenizer.LLAMA:
+    vocab_size_before = len(state)
+    state.add_tokens(list(additional_ids_to_tokens.values()), special_tokens=True)
+    vocab_size_after = len(state)
   else:
     assert False
 
@@ -95,9 +107,11 @@ def tokenize(s, tokenizer=DEFAULT_TOKENIZER):
     tokens = [bytearray([state.byte_decoder[c] for c in token]).decode('utf-8', errors=state.errors) for token in raw_tokens]
   elif tokenizer == Tokenizer.CUSTOM:
     tokens = s.strip().split()
+  elif tokenizer == Tokenizer.LLAMA:
+    tokens_ids = state.encode(s, add_special_tokens=False)
+    tokens = state.convert_ids_to_tokens(tokens_ids)
   else:
     assert False
-
   return tokens
 
 
@@ -111,6 +125,8 @@ def tokens_to_ids(tokens, tokenizer=DEFAULT_TOKENIZER):
       tokens_ids.extend(state.encoder[bpe_token] for bpe_token in state.bpe(token).split(' '))
   elif tokenizer == Tokenizer.CUSTOM:
     tokens_ids = [state[1][t] for t in tokens]
+  elif tokenizer == Tokenizer.LLAMA:
+    tokens_ids = state.convert_tokens_to_ids(tokens)
   else:
     assert False
 
@@ -128,6 +144,8 @@ def ids_to_tokens(tokens_ids, tokenizer=DEFAULT_TOKENIZER):
     tokens = [bytearray([state.byte_decoder[c] for c in token]).decode('utf-8', errors=state.errors) for token in tokens]
   elif tokenizer == Tokenizer.CUSTOM:
     tokens = [state[0][t] for t in tokens_ids]
+  elif tokenizer == Tokenizer.LLAMA:
+    tokens = state.convert_ids_to_tokens(tokens_ids)
   else:
     assert False
 
@@ -142,6 +160,10 @@ def detokenize(tokens, tokenizer=DEFAULT_TOKENIZER):
     s = ''.join(tokens)
   elif tokenizer == Tokenizer.CUSTOM:
     s = ' '.join(tokens)
+  elif tokenizer == Tokenizer.LLAMA:
+    state = _get_tokenizer_state(tokenizer)
+    tokens_ids = state.convert_tokens_to_ids(tokens)
+    s = state.decode(tokens_ids, skip_special_tokens=False)
   else:
     assert False
 
@@ -163,6 +185,8 @@ def vocab_size(tokenizer=DEFAULT_TOKENIZER):
     vocab_size = len(state.encoder)
   elif tokenizer == Tokenizer.CUSTOM:
     vocab_size = len(state[0])
+  elif tokenizer == Tokenizer.LLAMA:
+    vocab_size = len(state)
   else:
     assert False
 

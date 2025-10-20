@@ -6,3 +6,8 @@ GPT2_MODEL_NAMES = [
 ]
 GPT2_TOKENIZER_LEN = 50257
 GPT2_EOS_TOKEN_ID = 50256
+
+#add more as needed (will need to update tokenize_util.py to support new models)
+LLAMA_MODEL_NAMES = [
+    'meta-llama/Llama-3.2-1B'
+]
