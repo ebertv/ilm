@@ -12,7 +12,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler, TensorDataset)
 from tqdm import tqdm
-from transformers import GPT2Config, GPT2LMHeadModel, AdamW, CONFIG_NAME, WEIGHTS_NAME
+from transformers import GPT2Config, GPT2LMHeadModel, CONFIG_NAME, WEIGHTS_NAME
+from torch.optim import AdamW
 try:
   import wandb
 except:
@@ -102,12 +103,13 @@ def doc_and_char_masks_to_input_and_tt(
   except:
     doc_tokens = None
     #error_to_count['Failed to tokenize document'] += len(char_masks)
-
   # Align character masks to tokens
   tok_masks = []
   if doc_tokens is not None:
     for char_mask in char_masks:
       try:
+        if tokenizer == ilm.tokenize_util.Tokenizer.LLAMA:
+          doc = doc.replace(' ', 'Ġ')  # GPT2-style whitespace fixes most issues
         tok_mask = ilm.mask.util.align_char_mask_to_tokens(doc, doc_tokens, char_mask)
       except:
         #error_to_count['Failed to align character-level mask to tokens'] += 1
@@ -133,7 +135,10 @@ def doc_and_char_masks_to_input_and_tt(
 
   special_ids = set([start_infill_id, end_infill_id] + list(mask_type_to_id.values()))
 
-  inputs = np.zeros((len(contexts_and_answers), sequence_length), dtype=np.uint16)
+  if tokenizer == ilm.tokenize_util.Tokenizer.GPT2:
+    inputs = np.zeros((len(contexts_and_answers), sequence_length), dtype=np.uint16)
+  elif tokenizer == ilm.tokenize_util.Tokenizer.LLAMA:
+    inputs = np.zeros((len(contexts_and_answers), sequence_length), dtype=np.uint32)
   tts = np.full((len(contexts_and_answers), sequence_length), TargetType.PAD.value, dtype=np.uint8)
   for i, (mask, (context, answers)) in enumerate(contexts_and_answers):
     # Create example
@@ -197,7 +202,6 @@ def doc_and_char_masks_to_input_and_tt(
       tts[i, context_len+1:len(example)] = TargetType.INFILL.value
       for l in infill_special_idxs:
         tts[i, l] = TargetType.INFILL_SPECIAL.value
-
   return inputs, tts
 
 
@@ -208,7 +212,7 @@ def masked_dataset_to_inputs_and_tts(
     end_infill_id,
     mask_type_to_id,
     args):
-  assert split in ['train', 'eval']
+  assert split in ['train', 'eval', 'test']
   if split == 'train':
     examples_tag = args.train_examples_tag
     sequence_length = args.train_sequence_length
@@ -223,6 +227,7 @@ def masked_dataset_to_inputs_and_tts(
   with open(os.path.join(args.examples_dir, '{}.pkl'.format(examples_tag)), 'rb') as f:
     dataset = pickle.load(f)
   num_docs = len(dataset)
+  print('{} dataset: {} documents'.format(split, num_docs))
 
   # Mask and tokenize documents
   global _GLOBAL_WORKER_TARGET
@@ -238,6 +243,7 @@ def masked_dataset_to_inputs_and_tts(
     docs_inputs_and_tts = list(tqdm(
       p.imap(_worker_target, dataset),
       total=len(dataset)))
+  
 
   inputs = np.concatenate([i for i, _ in docs_inputs_and_tts], axis=0)
   tts = np.concatenate([t for _, t in docs_inputs_and_tts], axis=0)
@@ -248,7 +254,6 @@ def masked_dataset_to_inputs_and_tts(
     example_ids = random.sample(list(range(inputs.shape[0])), max_num_examples)
     inputs = np.take(inputs, example_ids, axis=0)
     tts = np.take(tts, example_ids, axis=0)
-
   return inputs, tts, num_docs
 
 
@@ -270,6 +275,7 @@ def train(args):
   elif n_gpu > 1:
     warnings.warn('This codebase is not optimized for multi GPU usage')
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  print('Using device: {}'.format(device))
 
   # Lambda for filenames
   example_tag_to_fp = lambda tag: os.path.join(args.examples_dir, '{}.pkl'.format(tag))
@@ -332,7 +338,6 @@ def train(args):
         with open(out_fn_to_fp('train_num_docs.pkl'), 'wb') as f:
           pickle.dump(train_num_docs, f)
     train_tt_to_count = {TargetType(k):v for k, v in zip(*np.unique(train_tts, return_counts=True))}
-    print(train_tt_to_count)
     num_unmasked = train_tt_to_count.get(TargetType.CONTEXT, 0)
     num_masked = train_tt_to_count.get(TargetType.INFILL, 0)
     print('Mask rate (tokens): {:.4f}'.format(num_masked / (num_unmasked + num_masked)))
@@ -369,6 +374,7 @@ def train(args):
       np.save(out_fn_to_fp('eval_tts.npy'), eval_tts)
       with open(out_fn_to_fp('eval_num_docs.pkl'), 'wb') as f:
         pickle.dump(eval_num_docs, f)
+  print(len(eval_inputs), len(eval_tts))
   eval_tt_to_count = {TargetType(k):v for k, v in zip(*np.unique(eval_tts, return_counts=True))}
   print(eval_tt_to_count)
   num_unmasked = eval_tt_to_count.get(TargetType.CONTEXT, 0)
@@ -399,10 +405,18 @@ def train(args):
 
   # Load model
   print('Initializing model...')
+  os.environ['TRANSFORMERS_OFFLINE'] = '0'
   set_random_seed(args.seed)
   if args.model_name in ilm.constants.GPT2_MODEL_NAMES:
     model_type = GPT2LMHeadModel
     cfg_type = GPT2Config
+  elif args.model_name in ilm.constants.LLAMA_MODEL_NAMES:
+    from transformers import AutoModelForCausalLM
+    model_type = AutoModelForCausalLM
+    cfg_type = None
+    from huggingface_hub import login
+    your_token = None  # Replace with your actual token
+    login(token=your_token)
   if resuming:
     print('from saved checkpoint (resuming)')
     model = model_type.from_pretrained(args.train_dir)
@@ -414,7 +428,10 @@ def train(args):
     else:
       print('from pretrained checkpoint')
       model = model_type.from_pretrained(args.model_name)
+  print('Model size: {:.2f}M parameters'.format(sum(p.numel() for p in model.parameters())/1000000.0))
+  print('Resizing token embeddings to {}'.format(vocab_size))
   model.resize_token_embeddings(vocab_size)
+  print('Moving model to device')
   model.to(device)
   model.train()
 
@@ -464,7 +481,9 @@ def train(args):
     for i, eval_batch in enumerate(eval_dataloader):
       with torch.no_grad():
         eval_inputs, eval_tts = tuple(t.to(device) for t in eval_batch)
-        eval_logits, _ = model(eval_inputs)
+        temp = model(eval_inputs)
+        # eval_logits, _ = model(eval_inputs)
+        eval_logits = temp.logits
         eval_logits_relevant = eval_logits[:, :-1].contiguous().view(-1, eval_logits.shape[-1])
 
         for tag, tts in [
@@ -529,7 +548,9 @@ def train(args):
           for i, eval_batch in enumerate(eval_dataloader):
             with torch.no_grad():
               eval_inputs, eval_tts = tuple(t.to(device) for t in eval_batch)
-              eval_logits, _ = model(eval_inputs)
+              # eval_logits, _ = model(eval_inputs)
+              temp = model(eval_inputs)
+              eval_logits = temp.logits
               eval_logits_relevant = eval_logits[:, :-1].contiguous().view(-1, eval_logits.shape[-1])
 
               for tag, tts in [
@@ -581,7 +602,9 @@ def train(args):
         # TODO: Option to skip training on INFILL_REDUNDANT?
         # NOTE: This would give Task.NAIVE/Task.LM less supervision overall but put them more in line with the supervision that Task.ILM and Task.NO_CONTEXT_ILM receive
         labels_infill = tts_to_labels(inputs, tts, [TargetType.INFILL, TargetType.INFILL_SPECIAL, TargetType.INFILL_REDUNDANT])
-        logits, _ = model(inputs)
+        # logits, _ = model(inputs)
+        temp = model(inputs)
+        logits = temp.logits
         logits_relevant = logits[:, :-1].contiguous().view(-1, logits.shape[-1])
         loss_context = F.cross_entropy(
             logits_relevant,
@@ -663,7 +686,7 @@ if __name__ == '__main__':
   data_args.add_argument('--data_loader_num_workers', type=int)
 
   model_args = parser.add_argument_group('Model')
-  model_args.add_argument('--model_name', type=str, choices=ilm.constants.GPT2_MODEL_NAMES)
+  model_args.add_argument('--model_name', type=str, choices=ilm.constants.GPT2_MODEL_NAMES + ilm.constants.LLAMA_MODEL_NAMES)
 
   train_args = parser.add_argument_group('Train')
   train_args.add_argument('--train_examples_tag', type=str)
