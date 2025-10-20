@@ -55,7 +55,9 @@ python preview_ilm_examples.py \
 
 ### Training an ILM model
 
-Once you've created training examples, you can start training an ILM model (fine-tuning GPT-2):
+Once you've created training examples, you can start training an ILM model 
+
+(fine-tuning GPT-2):
 
 ```sh
 DATASET=arxiv_cs_abstracts
@@ -69,6 +71,24 @@ python train_ilm.py \
 	--train_examples_tag train \
 	--eval_examples_tag valid \
 	--eval_max_num_examples 512
+	--model_name gpt2
+```
+
+(fine-tuning LLaMA):
+
+```sh
+DATASET=arxiv_cs_abstracts
+TRAIN_DIR=train
+EXAMPLES_DIR=data/char_masks/${DATASET}
+python train_ilm.py \
+	experiment_${DATASET} \
+	${TRAIN_DIR} \
+	${EXAMPLES_DIR} \
+	--seed 0 \
+	--train_examples_tag train \
+	--eval_examples_tag valid \
+	--eval_max_num_examples 512
+	--model_name meta-llama/Llama-3.2-1B
 ```
 
 Note that the training script automatically performs early stopping based on PPL on the validation set. To monitor training, you can set up an account on [Weights and Biases](https://www.wandb.com) and add the `--wandb` flag.
